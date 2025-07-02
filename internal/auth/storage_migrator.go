@@ -2,8 +2,10 @@ package auth
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 )
 
@@ -25,6 +27,7 @@ func NewStorageMigrator(source, destination StorageBackend) *StorageMigrator {
 
 // Migrate performs the migration from source to destination
 func (m *StorageMigrator) Migrate() error {
+	log.Printf("[DEBUG] Migrate called by:\n%s", debug.Stack())
 	// Get all providers from source
 	providers, err := m.source.List()
 	if err != nil {

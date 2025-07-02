@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,24 @@ type TokenInfo struct {
 	AccessToken  string `json:"access,omitempty"`
 	ExpiresAt    int64  `json:"expires,omitempty"`
 	APIKey       string `json:"key,omitempty"`
+}
+
+// legacy format for backward compatibility
+type legacy struct {
+	Version int    `json:"version"`
+	Access  string `json:"access_token"`
+	Refresh string `json:"refresh_token"`
+	Expires int64  `json:"expires"`
+}
+
+// nested format matches: {"anthropic":{"type":"oauth","access":"…","refresh":"…","expires":…}}
+type nested struct {
+	Anthropic struct {
+		Type    string `json:"type"`
+		Access  string `json:"access"`
+		Refresh string `json:"refresh"`
+		Expires int64  `json:"expires"`
+	} `json:"anthropic"`
 }
 
 // IsExpired checks if the token is expired
@@ -189,6 +208,7 @@ func (s *FileStorage) List() ([]string, error) {
 	}
 	
 	s.recordLatency("list", time.Since(start))
+	log.Printf("[DEBUG] List() collected %d tokens", len(providers))
 	return providers, nil
 }
 
@@ -221,7 +241,7 @@ func (s *FileStorage) Name() string {
 	return "file:" + s.path
 }
 
-// loadData loads the stored data from file
+// loadData loads the stored data from file with dual format support
 func (s *FileStorage) loadData() (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 	
@@ -233,13 +253,67 @@ func (s *FileStorage) loadData() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	
-	if len(fileData) > 0 {
-		if err := json.Unmarshal(fileData, &data); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal data: %w", err)
+	if len(fileData) == 0 {
+		return data, nil
+	}
+	
+	// Try to unmarshal as existing internal format first (map[string]*TokenInfo)
+	if err := json.Unmarshal(fileData, &data); err == nil {
+		// Check if this is already in the expected internal format
+		// Expected: {"anthropic": {"type":"oauth", "access":"...", ...}}
+		if anthropicData, exists := data["anthropic"]; exists {
+			// Try to convert to TokenInfo struct
+			jsonData, err := json.Marshal(anthropicData)
+			if err == nil {
+				var token TokenInfo
+				if json.Unmarshal(jsonData, &token) == nil && token.AccessToken != "" {
+					// Already in correct internal format
+					log.Printf("[DEBUG] branch-1 → SUCCESS ↪ %#v", token)
+					return data, nil
+				}
+				log.Printf("[DEBUG] branch-1 → FAIL unmarshal or empty AccessToken ↪ %#v", token)
+			} else {
+				log.Printf("[DEBUG] branch-1 → FAIL marshal anthropicData ↪ err=%v", err)
+			}
 		}
 	}
 	
-	return data, nil
+	// Try legacy format: {"version":1,"access_token":"...","refresh_token":"...","expires":...}
+	var v1 legacy
+	if json.Unmarshal(fileData, &v1) == nil && v1.Access != "" {
+		// Convert to new format
+		token := &TokenInfo{
+			Type:         "oauth",
+			AccessToken:  v1.Access,
+			RefreshToken: v1.Refresh,
+			ExpiresAt:    v1.Expires,
+		}
+		data["anthropic"] = token
+		log.Printf("[DEBUG] branch-2 → SUCCESS ↪ %#v", token)
+		return data, nil
+	}
+	log.Printf("[DEBUG] branch-2 → FAIL unmarshal or empty Access ↪ %#v", v1)
+	
+	// Try nested format: {"anthropic":{"type":"oauth","access":"...","refresh":"...","expires":...}}
+	var v2 nested
+	if json.Unmarshal(fileData, &v2) == nil && v2.Anthropic.Type == "oauth" {
+		// Convert to internal format
+		token := &TokenInfo{
+			Type:         "oauth",
+			AccessToken:  v2.Anthropic.Access,
+			RefreshToken: v2.Anthropic.Refresh,
+			ExpiresAt:    v2.Anthropic.Expires,
+		}
+		data["anthropic"] = token
+		log.Printf("[DEBUG] branch-3 → SUCCESS ↪ %#v", token)
+		return data, nil
+	}
+	log.Printf("[DEBUG] branch-3 → FAIL unmarshal or type != oauth ↪ %#v", v2)
+	
+	// If all parsing fails, return error
+	finalErr := fmt.Errorf("unsupported auth file format")
+	log.Printf("[DEBUG] nested-parse error: %v", finalErr)
+	return nil, finalErr
 }
 
 // Metrics tracking methods

@@ -113,6 +113,8 @@ func (f *StorageFactory) Create() (StorageBackend, error) {
 			// Log warning and fall back
 			fmt.Fprintf(os.Stderr, "Warning: Keyring storage unavailable, falling back to file storage: %v\n", err)
 		}
+		// ★ 新增：同步把 factory 的 storageType 改成文件
+		f.storageType = StorageTypeFile
 		return NewFileStorage(f.filePath), nil
 		
 	default:
